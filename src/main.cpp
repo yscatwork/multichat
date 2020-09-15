@@ -8,10 +8,14 @@ int main() {
   cout << "Running!" << endl;
 
   Server *s;
-  s = new Server();
+  s = new Server(); // new 와 delete 는 쌍을 이뤄야한다.
 
   //Main loop
   s->AcceptAndDispatch();
 
+  // added as new-delete pair
+  delete s;
+  
   return 0;
+ 
 }
