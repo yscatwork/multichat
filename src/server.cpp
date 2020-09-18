@@ -1,4 +1,5 @@
 #include "server.h"
+#include <stdexcept>   // for exception, runtime_error, out_of_range
 
 using namespace std;
 
@@ -8,27 +9,42 @@ vector<Client> Server::clients;
 Server::Server() {
 
   //Initialize static mutex from MyThread
-  MyThread::InitMutex();
+  MyThread::InitMutex(); {
+    //1. 소켓을 만든다 // 에러 처리 필요 (socket 이 -1 return 할 경우 감안)
+    // 에러 처리 exception 적용 (https://stdcxx.apache.org/doc/stdlibug/18-4.html)
 
-  //For setsock opt (REUSEADDR)
-  int yes = 1;
+    serverSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSock < 0){
+      throw std::runtime_error ("serverSock returned -1"); 
+    }
+    
+    //2. For setsock opt (REUSEADDR)//(optional) 만들어진 소켓에 추가적인 설정 
+    //Avoid bind error if the socket was not close()'d last time;
+    int yes = 1;
+    int setsocketopt_result = setsockopt(serverSock,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(int));
+    if(setsocketopt_result < 0){
+      throw std::runtime_error ("setsockopt returned -1"); 
+    }
 
-  //Init serverSock and start listen()'ing
-  serverSock = socket(AF_INET, SOCK_STREAM, 0);
-  memset(&serverAddr, 0, sizeof(sockaddr_in));
-  serverAddr.sin_family = AF_INET;
-  serverAddr.sin_addr.s_addr = INADDR_ANY;
-  serverAddr.sin_port = htons(PORT);
-
-  //Avoid bind error if the socket was not close()'d last time;
-  setsockopt(serverSock,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(int));
-
-  if(bind(serverSock, (struct sockaddr *) &serverAddr, sizeof(sockaddr_in)) < 0)
-    cerr << "Failed to bind";
-
-  listen(serverSock, 5);
-}
-
+    //3. 메모리 clear - 0채워줌
+    memset(&serverAddr, 0, sizeof(sockaddr_in));
+    
+    //4. 만들어진 소켓에 주소 바인딩
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(PORT);
+    int bind_result=bind(serverSock, (struct sockaddr *) &serverAddr, sizeof(sockaddr_in));
+    if (bind_result < 0){
+      throw std::runtime_error ("bind returned -1"); 
+    }
+  
+    //5. 연결된 주소에서 접속 대기
+    int listen_result = listen(serverSock, 5);
+    if (listen_result < 0){
+      throw std::runtime_error ("listen returned -1"); 
+    }
+  };
+};
 /*
 	AcceptAndDispatch();
 
@@ -41,21 +57,22 @@ void Server::AcceptAndDispatch() {
   Client *c;
   MyThread *t;
 
-  socklen_t cliSize = sizeof(sockaddr_in);
-
+  socklen_t cliSize = sizeof(sockaddr_in); 
   while(1) {
 
-          c = new Client();
+    c = new Client(); //이들도 delete 되어야 하는데 안 되어있다.
 	  t = new MyThread();
 
 	  //Blocks here;
-          c->sock = accept(serverSock, (struct sockaddr *) &clientAddr, &cliSize);
+	  // clientAddr 선언도 이동하는것이 나음
+    c->sock = accept(serverSock, (struct sockaddr *) &clientAddr, &cliSize);
 
 	  if(c->sock < 0) {
-	    cerr << "Error on accept";
+      throw std::runtime_error ("accept returned -1"); 
+	    //cerr << "Error on accept";
 	  }
 	  else {
-	    t->Create((void *) Server::HandleClient, c);
+	    t->Create((void *) Server::HandleClient, c); //실행중인 thread(들)에 대해 모두 join 한 뒤에 t가 delete 되어야 한다.
 	  }
   }
 }
@@ -71,14 +88,15 @@ void *Server::HandleClient(void *args) {
 
   //Add client in Static clients <vector> (Critical section!)
   MyThread::LockMutex((const char *) c->name);
-  
-    //Before adding the new client, calculate its id. (Now we have the lock)
-    c->SetId(Server::clients.size());
-    sprintf(buffer, "Client n.%d", c->id);
-    c->SetName(buffer);
-    cout << "Adding client with id: " << c->id << endl;
-    Server::clients.push_back(*c);
-
+   // lock된 구간이 짧은 것이 성능에중요.
+    {
+      //Before adding the new client, calculate its id. (Now we have the lock)
+    c->SetId(Server::clients.size()); //id를 ip로 할수도 있다 (바꿔보기)
+      sprintf(buffer, "Client n.%d", c->id);
+      c->SetName(buffer);
+      cout << "Adding client with id: " << c->id << endl;
+      Server::clients.push_back(*c);
+    }
   MyThread::UnlockMutex((const char *) c->name);
 
   while(1) {
